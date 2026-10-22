@@ -1,4 +1,4 @@
-// GPS watcher + optional device compass. Emits 'gps' (status/fix changes) and 'fix' (new position).
+﻿// GPS watcher + optional device compass. Emits 'gps' (status/fix changes) and 'fix' (new position).
 import { emit, log } from './store.js';
 
 export const gps = {
@@ -6,7 +6,6 @@ export const gps = {
   fix: null, // {lat,lng,acc,speed,cog,alt,ts}
   recvAt: 0, // Date.now() of last fix
   compass: null, // degrees from device sensor, or null
-  compassOn: false,
 };
 
 const STALE_MS = 10000;
@@ -74,39 +73,73 @@ export async function permissionState() {
   try { return (await navigator.permissions.query({ name: 'geolocation' })).state; } catch { return 'unknown'; }
 }
 
-// ---- compass (phone heading; only meaningful if the phone is mounted aligned with the boat) ----
+// ---- compass: always attempted. Phone heading; tilt-compensated so it also works with the phone held upright ----
+// gps.compassState: 'off' | 'waiting' (needs a tap on iOS) | 'on' | 'denied' | 'unsupported'
+gps.compassState = 'off';
 let lastCompassEmit = 0;
+let compassTimer = null;
+let smooth = null;
+
+const rad = (d) => (d * Math.PI) / 180;
+
+function tiltHeading(alpha, beta, gamma) {
+  // W3C DeviceOrientation example: direction the back of the device points, tilt-compensated.
+  const a = rad(alpha), b = rad(beta), g = rad(gamma);
+  const cA = Math.cos(a), sA = Math.sin(a), sB = Math.sin(b), cG = Math.cos(g), sG = Math.sin(g);
+  const vx = -cA * sG - sA * sB * cG;
+  const vy = -sA * sG + cA * sB * cG;
+  let h = Math.atan2(vx, vy) * (180 / Math.PI);
+  if (h < 0) h += 360;
+  return h;
+}
+
 function onOrient(e) {
   let h = null;
-  if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;
-  else if (e.absolute && typeof e.alpha === 'number') h = (360 - e.alpha) % 360;
-  if (h == null) return;
-  const ang = screen.orientation?.angle || 0;
-  gps.compass = (h + ang + 360) % 360;
-  const now = Date.now();
-  if (now - lastCompassEmit > 200) { lastCompassEmit = now; emit('compass', gps.compass); }
-}
-
-export async function enableCompass() {
-  if (gps.compassOn) return true;
-  try {
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      if ((await DeviceOrientationEvent.requestPermission()) !== 'granted') return false;
-    }
-    window.addEventListener('deviceorientationabsolute', onOrient);
-    window.addEventListener('deviceorientation', onOrient);
-    gps.compassOn = true;
-    return true;
-  } catch (e) {
-    log('warn', 'compass', e);
-    return false;
+  if (typeof e.webkitCompassHeading === 'number' && e.webkitCompassHeading >= 0) h = e.webkitCompassHeading; // iOS (already tilt-compensated)
+  else if ((e.absolute || e.type === 'deviceorientationabsolute') && typeof e.alpha === 'number' && typeof e.beta === 'number' && typeof e.gamma === 'number') {
+    h = tiltHeading(e.alpha, e.beta, e.gamma);
+    if (Math.abs(e.beta) < 50) h = (h + (screen.orientation?.angle || 0)) % 360; // lying flat: follow the screen's up direction
   }
+  if (h == null) return;
+  if (gps.compassState !== 'on') { gps.compassState = 'on'; clearTimeout(compassTimer); emit('compassState', 'on'); }
+  // circular low-pass filter
+  smooth = smooth == null ? h : (smooth + (((h - smooth + 540) % 360) - 180) * 0.25 + 360) % 360;
+  gps.compass = smooth;
+  const now = Date.now();
+  if (now - lastCompassEmit > 150) { lastCompassEmit = now; emit('compass', gps.compass); }
 }
 
-export function disableCompass() {
-  window.removeEventListener('deviceorientationabsolute', onOrient);
-  window.removeEventListener('deviceorientation', onOrient);
-  gps.compassOn = false;
-  gps.compass = null;
-  emit('compass', null);
+let attached = false;
+function attach() {
+  if (attached) return;
+  attached = true;
+  window.addEventListener('deviceorientationabsolute', onOrient, true);
+  window.addEventListener('deviceorientation', onOrient, true);
+  // If no usable reading arrives (desktop, no sensor), report unsupported rather than guess.
+  compassTimer = setTimeout(() => { if (gps.compassState !== 'on') { gps.compassState = 'unsupported'; emit('compassState', 'unsupported'); } }, 4000);
 }
+
+/** Call at boot (works on Android) and again from a user gesture (required by iOS). Safe to call repeatedly. */
+let compassBusy = false;
+export async function startCompass() {
+  if (gps.compassState === 'on' || gps.compassState === 'denied' || compassBusy) return gps.compassState;
+  compassBusy = true;
+  try {
+    const D = window.DeviceOrientationEvent;
+    if (typeof D === 'undefined') { gps.compassState = 'unsupported'; emit('compassState', gps.compassState); return gps.compassState; }
+    if (typeof D.requestPermission === 'function') {
+      // iOS: only a user gesture may ask. Outside a gesture this throws; we then wait for the next tap.
+      const r = await D.requestPermission();
+      if (r !== 'granted') { gps.compassState = 'denied'; emit('compassState', gps.compassState); return gps.compassState; }
+    }
+    attach();
+    if (gps.compassState === 'off') { gps.compassState = 'waiting'; emit('compassState', gps.compassState); }
+  } catch (e) {
+    log('info', 'compass waiting for gesture', e);
+    gps.compassState = 'waiting';
+    emit('compassState', gps.compassState);
+  } finally { compassBusy = false; }
+  return gps.compassState;
+}
+
+export const compassOK = () => gps.compassState === 'on' && gps.compass != null;

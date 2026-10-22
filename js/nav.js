@@ -6,6 +6,8 @@ import { gps } from './gps.js';
 
 export const nav = {
   active: false,
+  startedAt: 0,
+  sogAvg: null, // smoothed speed (m/s) used for time-left / arrival estimates
   points: [], // [{lat,lng,name}]
   idx: 0, // index of current target
   legStart: null, // {lat,lng}
@@ -16,7 +18,8 @@ export const nav = {
 const saved = lsGet('bn.nav');
 if (saved?.active && saved.points?.length) Object.assign(nav, saved, { info: null });
 
-const persist = () => lsSet('bn.nav', nav.active ? { active: true, points: nav.points, idx: nav.idx, legStart: nav.legStart, routeName: nav.routeName } : null);
+const persist = () => lsSet('bn.nav', nav.active ? { active: true, points: nav.points, idx: nav.idx, legStart: nav.legStart, routeName: nav.routeName, startedAt: nav.startedAt } : null);
+if (nav.active && !nav.startedAt) nav.startedAt = Date.now();
 
 /** startAt: fixed origin of the first leg; defaults to the boat's current position. */
 export function startNav(points, routeName = '', startAt = null) {
@@ -25,6 +28,8 @@ export function startNav(points, routeName = '', startAt = null) {
   nav.points = points.map((p) => ({ lat: p.lat, lng: p.lng, name: p.name || '' }));
   nav.idx = 0;
   nav.routeName = routeName;
+  nav.startedAt = Date.now();
+  nav.sogAvg = null;
   nav.legStart = startAt ? { lat: startAt.lat, lng: startAt.lng } : gps.fix ? { lat: gps.fix.lat, lng: gps.fix.lng } : null;
   offCount = 0;
   persist();
@@ -73,9 +78,12 @@ export function update(fix) {
   for (let i = nav.idx; i < nav.points.length - 1; i++) remaining += distM(nav.points[i], nav.points[i + 1]);
 
   const xte = offTrackM(here, nav.legStart, target);
-  const sog = fix.speed;
-  const eta = sog != null && sog > 0.5 * KN ? Date.now() + (remaining / sog) * 1000 : null;
-  nav.info = { toNext, remaining, brg: bearing(here, target), xte, eta, arrived: false };
+  // Smoothed speed for the estimate; below ~1 kn we fall back to the planned speed and say so (estimated=true).
+  if (fix.speed != null) nav.sogAvg = nav.sogAvg == null ? fix.speed : nav.sogAvg * 0.85 + fix.speed * 0.15;
+  const moving = nav.sogAvg != null && nav.sogAvg >= 0.5 * KN;
+  const speedForEta = moving ? nav.sogAvg : s.plannedSpeedKn * KN;
+  const leftMs = (remaining / speedForEta) * 1000;
+  nav.info = { toNext, remaining, brg: bearing(here, target), xte, leftMs, eta: Date.now() + leftMs, estimated: !moving, arrived: false };
 
   // Off-course: needs 3 consecutive fixes beyond threshold; clears at 80% (hysteresis).
   if (xte > s.offCourseM) offCount++;

@@ -20,6 +20,7 @@ export const defaults = {
 let settings = { ...defaults };
 try { Object.assign(settings, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { /* corrupt or blocked: use defaults */ }
 
+if (settings.base === 'dark') settings.base = 'osm'; // dark map layer was removed
 const listeners = {};
 export const on = (evt, fn) => { (listeners[evt] ||= []).push(fn); };
 export const emit = (evt, data) => { for (const fn of listeners[evt] || []) { try { fn(data); } catch (e) { log('error', 'listener ' + evt, e); } } };

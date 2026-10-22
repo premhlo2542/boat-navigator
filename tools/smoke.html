@@ -1,9 +1,9 @@
-<!doctype html>
+﻿<!doctype html>
 <meta charset="utf-8">
 <title>smoke</title>
 <link rel="stylesheet" href="../vendor/leaflet.css"><link rel="stylesheet" href="../css/app.css">
 <pre id="out" style="position:relative;z-index:9999;background:#fff;color:#000;margin:0;white-space:pre-wrap">RUNNING</pre>
-<script src="../vendor/leaflet.js"></script>
+<script src="../vendor/leaflet.js"></script><script src="../vendor/leaflet-rotate.js"></script>
 <script type="module">
 const out = document.getElementById('out');
 const lines = [];
@@ -34,7 +34,7 @@ try {
   ok(u.fmtCoord({ lat: 13.75, lng: 100.5 }, 'dms').lat === `13° 45′ 0.0″ N`, 'dms');
   ok(u.parseCoords('13.7, 100.5')?.lng === 100.5 && u.parseCoords('99, 10') === null && u.parseCoords('abc') === null, 'parseCoords');
   ok(u.fmtSpeed(1852 / 3600 * 10, 'kn').value === '10' && u.fmtSpeed(null) === null, 'fmtSpeed 10kn / null');
-  ok(u.fmtDist(100, 'nm').unit === 'm' && u.fmtDist(3704, 'nm').value === '2.00', 'fmtDist');
+  ok(u.fmtDist(100, 'nm').unit === 'ม.' && u.fmtDist(3704, 'nm').value === '2.00', 'fmtDist');
   ok(u.esc('<b>"x"</b>') === '&lt;b&gt;&quot;x&quot;&lt;/b&gt;', 'esc');
 
   const g = await import('../js/gpx.js');
@@ -54,14 +54,29 @@ try {
   const nav = await import('../js/nav.js');
   const trip = await import('../js/trip.js');
   const { app } = await import('../js/app.js');
-  const feed = (lat, lng, speed = 5, acc = 5) => { gps.fix = { lat, lng, acc, speed, cog: 0, alt: null, ts: Date.now() }; gps.recvAt = Date.now(); gps.status = 'ok'; emit('gps', 'ok'); emit('fix', gps.fix); };
+  const feed = (lat, lng, speed = 5, acc = 5, cog = 0) => { gps.fix = { lat, lng, acc, speed, cog, alt: null, ts: Date.now() }; gps.recvAt = Date.now(); gps.status = 'ok'; emit('gps', 'ok'); emit('fix', gps.fix); };
   feed(0, 0);
   ok(/5\.0|5\.1|9\.7|9\.8/.test(document.querySelector('#hud .cell .v').textContent) || document.querySelector('#hud .cell .v').textContent.length > 0, 'SOG renders: ' + document.querySelector('#hud .cell .v').textContent);
   ok(document.querySelector('#gpsChip').textContent.includes('±5'), 'GPS chip shows accuracy');
 
+  // HUD DOM must be stable across fixes (otherwise taps get lost)
+  const hudBtn = document.querySelector('#hud .hud-main'); const hudCell = document.querySelector('#hud .cell');
+  feed(0.0001, 0); feed(0.0002, 0);
+  ok(document.querySelector('#hud .hud-main') === hudBtn && document.querySelector('#hud .cell') === hudCell, 'HUD elements keep identity across fixes');
+  const mp = await import('../js/map.js');
+  feed(0.0003, 0, 5, 5, 90); await new Promise((r) => setTimeout(r, 900));
+  ok(Math.abs(mp.getBearing() - 270) < 3, 'course-up: COG 90 => map turned to bearing 270 (-90): ' + mp.getBearing().toFixed(1));
+  const cp = mp.latLngToPoint(0.0003 + 0.002, 0), cc = mp.latLngToPoint(0.0003, 0);
+  ok(cp.x < cc.x - 5 && Math.abs(cp.y - cc.y) < 5, 'bearing 90 => north is to the LEFT on screen (north dx=' + Math.round(cp.x - cc.x) + ', dy=' + Math.round(cp.y - cc.y) + ')');
+  ok(document.querySelector('.boat-rot').style.transform.includes('rotate('), 'boat icon rotated: ' + document.querySelector('.boat-rot').style.transform);
+  mp.setMode('north'); await new Promise((r) => setTimeout(r, 900));
+  ok(Math.abs(((mp.getBearing() + 180) % 360) - 180) < 3, 'north-up resets bearing to 0: ' + mp.getBearing().toFixed(1));
+  mp.setMode('course');
+
   // trip recording
   await trip.start('t');
   feed(0.0005, 0); feed(0.0010, 0); feed(0.00101, 0);
+  ok(/[0-9]/.test(document.querySelector('#hud [data-k=dur] .v').textContent), 'trip duration cell shows value: ' + document.querySelector('#hud [data-k=dur] .v').textContent);
   ok(trip.rec.trip.points.length === 2 && trip.rec.trip.distanceM > 50 && trip.rec.trip.distanceM < 60, 'trip: 2 points, 1m jitter step skipped, dist=' + Math.round(trip.rec.trip.distanceM) + ' n=' + trip.rec.trip.points.length);
   const done = await trip.stop();
   ok(done.status === 'done', 'trip stopped');
@@ -73,6 +88,7 @@ try {
   feed(0, 0);
   nav.startNav([{ lat: 0.05, lng: 0, name: 'dest' }]);
   ok(nav.nav.active && nav.nav.info && Math.abs(nav.nav.info.remaining - 5560) < 30, 'nav remaining ~5.56km: ' + Math.round(nav.nav.info?.remaining));
+  ok(['left','eta','dist'].every((k) => /[0-9]/.test(document.querySelector('#hud [data-k=' + k + '] .v').textContent)), 'nav HUD shows time-left, arrival, distance: ' + ['spd','left','eta','dist'].map((k) => document.querySelector('#hud [data-k=' + k + ']').textContent.replace(/\s+/g,' ')).join(' | '));
   feed(0.01, 0.004); feed(0.011, 0.004); feed(0.012, 0.004);
   ok(document.querySelector('#alerts').textContent.includes('ออกนอกเส้นทาง'), 'off-course alert shown');
   feed(0.0499, 0);

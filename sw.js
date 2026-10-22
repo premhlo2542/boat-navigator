@@ -1,15 +1,15 @@
 // Service worker: precached app shell + runtime cache of map tiles the user has actually viewed.
 // Tiles are NOT bulk-downloaded (OpenStreetMap tile policy forbids it); only visited areas work offline.
-const SHELL = 'bn-shell-v1';
+const SHELL = 'bn-shell-v2';
 const TILES = 'bn-tiles-v1';
 const MAX_TILES = 1200;
 const ASSETS = [
-  './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'vendor/leaflet.js', 'vendor/leaflet.css',
+  './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'vendor/leaflet.js', 'vendor/leaflet-rotate.js', 'vendor/leaflet.css',
   'js/main.js', 'js/app.js', 'js/ui.js', 'js/views.js', 'js/util.js', 'js/db.js', 'js/store.js', 'js/gps.js',
   'js/alerts.js', 'js/nav.js', 'js/trip.js', 'js/gpx.js', 'js/map.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
-const TILE_HOSTS = ['tile.openstreetmap.org', 'basemaps.cartocdn.com', 'tiles.openseamap.org'];
+const TILE_HOSTS = ['tile.openstreetmap.org', 'tiles.openseamap.org'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

@@ -1,4 +1,4 @@
-// Geodesy, formatting and small helpers. No DOM access here.
+﻿// Geodesy, formatting and small helpers. No DOM access here.
 const R = 6371008.8;
 const rad = (d) => (d * Math.PI) / 180;
 const deg = (r) => (r * 180) / Math.PI;
@@ -58,14 +58,14 @@ export { NA };
 export function fmtSpeed(mps, unit = 'kn') {
   if (mps == null || !Number.isFinite(mps)) return null;
   const v = unit === 'kmh' ? mps * 3.6 : unit === 'mph' ? mps * 2.23694 : mps / KN;
-  return { value: v.toFixed(v < 10 ? 1 : 0), unit: unit === 'kmh' ? 'km/h' : unit === 'mph' ? 'mph' : 'kn' };
+  return { value: v.toFixed(v < 10 ? 1 : 0), unit: unit === 'kmh' ? 'กม./ชม.' : unit === 'mph' ? 'ไมล์/ชม.' : 'นอต' };
 }
 
 export function fmtDist(m, unit = 'nm') {
   if (m == null || !Number.isFinite(m)) return null;
-  if (unit === 'km') return m < 1000 ? { value: Math.round(m), unit: 'm' } : { value: (m / 1000).toFixed(m < 10000 ? 2 : 1), unit: 'km' };
-  if (unit === 'mi') return m < 160 ? { value: Math.round(m), unit: 'm' } : { value: (m / 1609.344).toFixed(2), unit: 'mi' };
-  return m < NM * 0.1 ? { value: Math.round(m), unit: 'm' } : { value: (m / NM).toFixed(m < NM * 10 ? 2 : 1), unit: 'nm' };
+  if (unit === 'km') return m < 1000 ? { value: Math.round(m), unit: 'ม.' } : { value: (m / 1000).toFixed(m < 10000 ? 2 : 1), unit: 'กม.' };
+  if (unit === 'mi') return m < 160 ? { value: Math.round(m), unit: 'ม.' } : { value: (m / 1609.344).toFixed(2), unit: 'ไมล์' };
+  return m < NM * 0.1 ? { value: Math.round(m), unit: 'ม.' } : { value: (m / NM).toFixed(m < NM * 10 ? 2 : 1), unit: 'ไมล์ทะเล' };
 }
 
 export const joinVU = (o) => (o ? `${o.value} ${o.unit}` : NA);
@@ -74,13 +74,26 @@ export function fmtBearing(d) {
   return d == null || !Number.isFinite(d) ? null : String(Math.round(d) % 360).padStart(3, '0') + '°';
 }
 
+/** Compact {value,unit} for big HUD cells: '25' นาที, or '1:34' ชม. */
+export function fmtDurCell(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const m = Math.round(ms / 60000);
+  if (m < 60) return { value: String(m), unit: 'นาที' };
+  const h = Math.floor(m / 60);
+  if (h >= 100) return { value: String(Math.floor(h / 24)), unit: 'วัน' };
+  return { value: h + ':' + String(m % 60).padStart(2, '0'), unit: 'ชม.:นาที' };
+}
+
+const DIRS = ['เหนือ', 'ตะวันออกเฉียงเหนือ', 'ตะวันออก', 'ตะวันออกเฉียงใต้', 'ใต้', 'ตะวันตกเฉียงใต้', 'ตะวันตก', 'ตะวันตกเฉียงเหนือ'];
+export const dirWord = (d) => (d == null || !Number.isFinite(d) ? null : DIRS[Math.round((((d % 360) + 360) % 360) / 45) % 8]);
+
 export function fmtDur(ms) {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
   const s = Math.round(ms / 1000);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   if (h >= 100) return `${Math.floor(h / 24)}d ${h % 24}h`;
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')} ชม.` : `${m} นาที`;
+  return h > 0 ? `${h} ชม. ${m} นาที` : `${m} นาที`;
 }
 
 export const fmtClock = (ts) => new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });

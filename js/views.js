@@ -1,14 +1,14 @@
-// Full-page views: Routes, Places, Trips, Settings. Pure HTML builders + delegated action handlers.
+﻿// Full-page views: Routes, Places, Trips, Settings. Pure HTML builders + delegated action handlers.
 import { app, CATS, saveDraft, $ } from './app.js';
 import { db } from './db.js';
-import { gps, enableCompass, disableCompass } from './gps.js';
+import { gps, startCompass } from './gps.js';
 import { getSettings, setSetting, emit } from './store.js';
 import { nav, startNav, stopNav, anchor, setAnchor } from './nav.js';
 import * as trip from './trip.js';
 import { downloadGpx } from './gpx.js';
 import { toast } from './alerts.js';
 import { modal, confirmDlg } from './ui.js';
-import { esc, uid, distM, bearing, KN, fmtDist, fmtSpeed, fmtDur, fmtBearing, fmtDateTime, joinVU, joinCoord, parseCoords, validLatLng, NA } from './util.js';
+import { esc, uid, distM, bearing, KN, fmtDist, fmtSpeed, fmtDur, fmtDurCell, fmtBearing, fmtDateTime, joinVU, joinCoord, parseCoords, validLatLng, NA } from './util.js';
 
 const ic = (n, cls = '') => `<svg class="ic ${cls}"><use href="#i-${n}"/></svg>`;
 const here = () => (gps.fix ? { lat: gps.fix.lat, lng: gps.fix.lng } : null);
@@ -223,6 +223,13 @@ async function placeAction(a, el) {
 }
 
 // ============================ TRIPS ============================
+export function recLiveText() {
+  const t = trip.rec.trip;
+  if (!t) return '';
+  const sm = trip.summary(t);
+  return ` · ${fmtDur(sm.ms) || '0 นาที'} · ${t.points.length} จุด`;
+}
+
 export function recCardHtml() {
   const s = getSettings();
   if (trip.rec.status === 'idle') {
@@ -233,7 +240,7 @@ export function recCardHtml() {
   const sm = trip.summary(t);
   const paused = trip.rec.status === 'paused';
   return `<div class="card"><div class="row"><span class="led ${paused ? 'warn' : 'bad pulse'}"></span><div class="grow"><div class="title">${paused ? 'หยุดชั่วคราว' : 'กำลังบันทึก'}: ${esc(t.name)}</div>
-    <div class="sub num">${dTxt(sm.distanceM)} · ${fmtDur(sm.ms) || '0 นาที'} · ${t.points.length} จุด</div></div></div>
+    <div class="sub num" id="recLive">${recLiveText()}</div></div></div>
     <div class="row" style="margin-top:10px">${paused ? `<button class="btn primary grow" data-a="t-resume">${ic('play', 'sm')} เล่นต่อ</button>` : `<button class="btn grow" data-a="t-pause">${ic('pause', 'sm')} หยุดชั่วคราว</button>`}<button class="btn danger grow" data-a="t-stop">${ic('stop', 'sm')} สิ้นสุด</button></div></div>`;
 }
 
@@ -281,6 +288,10 @@ async function tripAction(a, el) {
 // ============================ SETTINGS ============================
 const seg = (key, opts, cur) => `<div class="seg" role="group">${opts.map(([v, l]) => `<button data-s="${key}" data-v="${v}" class="${cur === v ? 'on' : ''}" aria-pressed="${cur === v}">${l}</button>`).join('')}</div>`;
 
+function compassText() {
+  return { on: 'ทำงานอยู่ — ใช้บอกหัวเรือตอนเรือจอดหรือช้า (ตอนเรือแล่นจะใช้ทิศจาก GPS) ได้ผลดีเมื่อวางมือถือขนานกับหัวเรือ', waiting: 'รอการอนุญาต — แตะปุ่มด้านขวาแล้วกดอนุญาต', denied: 'ถูกปฏิเสธ — เปิดสิทธิ์เซนเซอร์การเคลื่อนไหวในตั้งค่าเบราว์เซอร์ แล้วโหลดหน้าใหม่', unsupported: 'อุปกรณ์นี้ไม่มีเข็มทิศ — ใช้ทิศจาก GPS เมื่อเรือเคลื่อนที่แทน', off: 'ยังไม่เริ่ม' }[gps.compassState];
+}
+
 export function renderSettings() {
   const s = getSettings();
   const num = (key, label, hint, min, max, step = 1) => `<div class="setting"><div class="grow">${label}<small>${hint}</small></div><input type="number" style="width:96px" data-s="${key}" data-num="1" min="${min}" max="${max}" step="${step}" value="${s[key]}"></div>`;
@@ -290,7 +301,7 @@ export function renderSettings() {
     <div class="field"><label>ธีม</label>${seg('theme', [['dark', 'มืด'], ['light', 'สว่าง'], ['contrast', 'คอนทราสต์สูง']], s.theme)}</div>
     <div class="sub">คอนทราสต์สูง: พื้นขาว ตัวอักษรดำ เหมาะกับแสงแดดจ้า</div></div>
   <h2>แผนที่</h2><div class="card">
-    <div class="field"><label>แผนที่พื้นฐาน</label>${seg('base', [['osm', 'OpenStreetMap'], ['dark', 'มืด (CARTO)'], ['custom', 'กำหนดเอง']], s.base)}</div>
+    <div class="field"><label>แผนที่พื้นฐาน</label>${seg('base', [['osm', 'OpenStreetMap'], ['custom', 'กำหนดเอง']], s.base)}</div>
     ${s.base === 'custom' ? `<div class="field"><label>Tile URL (ต้องมี {z} {x} {y})</label><input type="text" data-s="customTileUrl" value="${esc(s.customTileUrl)}" placeholder="https://…/{z}/{x}/{y}.png"></div><div class="sub">โปรดตรวจเงื่อนไขการใช้งานและการแสดง attribution ของผู้ให้บริการที่ใช้</div>` : ''}
     ${sw('seamarks', 'ชั้นข้อมูลทางทะเล (OpenSeaMap)', 'ทุ่น ไฟ เครื่องหมายเดินเรือ — ข้อมูลจากอาสาสมัคร ไม่ใช่แผนที่เดินเรือทางการ')}</div>
   <h2>หน่วยและพิกัด</h2><div class="card">
@@ -303,17 +314,16 @@ export function renderSettings() {
     ${num('arriveM', 'รัศมีถึงจุดหมาย (เมตร)', 'ถึงจุดนี้แล้วจะเลื่อนไปจุดถัดไป', 20, 2000, 10)}
     ${num('lowAccM', 'เตือนความแม่นยำต่ำ (เมตร)', 'เตือนเมื่อ GPS accuracy แย่กว่าค่านี้', 10, 500, 5)}
     ${sw('wakeLock', 'เปิดหน้าจอค้างไว้', 'ป้องกันหน้าจอดับขณะใช้งาน (ใช้แบตเตอรี่มากขึ้น)')}
-    ${sw('sound', 'เสียง/สั่นเมื่อมีการเตือนสำคัญ', 'ใช้กับ Anchor Watch และ GPS ขาดหาย')}</div>
-  <h2>เซนเซอร์ทิศทาง</h2><div class="card"><div class="setting"><div class="grow">เข็มทิศของอุปกรณ์ (Heading)<small>${gps.compassOn ? 'เปิดอยู่ — ค่านี้คือทิศของ<b>โทรศัพท์</b> ถูกต้องเมื่อยึดโทรศัพท์ขนานกับหัวเรือ' : 'ปิดอยู่ — Heading จะแสดง “ไม่มีข้อมูล”'}</small></div>
-    <button class="btn sm ${gps.compassOn ? '' : 'primary'}" data-a="s-compass">${gps.compassOn ? 'ปิด' : 'เปิดใช้'}</button></div></div>
+    ${sw('sound', 'เสียง/สั่นเมื่อมีการเตือนสำคัญ', 'ใช้กับเตือนเรือลอยและ GPS ขาดหาย')}</div>
+  <h2>เข็มทิศ (หัวเรือ)</h2><div class="card"><div class="setting"><div class="grow">เปิดใช้งานอัตโนมัติเสมอ<small>${compassText()}</small></div>${gps.compassState === 'on' ? '<span class="badge-s ok">ทำงาน</span>' : '<button class="btn sm primary" data-a="s-compass">เปิดเข็มทิศ</button>'}</div></div>
   <h2>ข้อมูลในเครื่อง</h2><div class="card"><button class="btn block" data-a="s-cache">ล้างแคชแผนที่ออฟไลน์</button><div class="sub" style="margin-top:8px">Waypoints เส้นทาง และทริปไม่ถูกลบ</div></div>
   <h2>เกี่ยวกับ</h2><div class="note">Boat Navigator เป็นเครื่องมือช่วยประกอบการเดินเรือ <b>ไม่ใช่</b>เครื่องมือนำทางหลัก และไม่ทดแทนแผนที่เดินเรือทางการ การสังเกตการณ์ และวิจารณญาณของผู้ควบคุมเรือ แอปไม่ตรวจจับสิ่งกีดขวาง ความลึก หรือป้องกันการชน</div>`;
 }
 
 async function settingsAction(a) {
   if (a === 's-compass') {
-    if (gps.compassOn) disableCompass();
-    else if (!(await enableCompass())) toast('เปิดเข็มทิศไม่ได้ — อุปกรณ์ไม่รองรับหรือไม่ได้รับอนุญาต', 'err');
+    gps.compassState = gps.compassState === 'denied' ? 'denied' : 'off';
+    await startCompass();
     app.fn.refresh();
   } else if (a === 's-cache') {
     if (!(await confirmDlg('ล้างแคชแผนที่?', 'แผนที่ที่ดูไว้แล้วจะต้องโหลดใหม่เมื่อมีอินเทอร์เน็ต', 'ล้างแคช'))) return;

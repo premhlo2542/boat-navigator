@@ -49,6 +49,7 @@
     <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
     <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></symbol>
+    <symbol id="i-north" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M12 4.5 15.5 12h-7z" fill="currentColor"/><path d="M8.5 12 12 19.5 15.5 12" opacity=".45"/></symbol>
     <symbol id="i-satellite" viewBox="0 0 24 24"><path d="M12 12a4 4 0 0 1 4 4M12 8a8 8 0 0 1 8 8M12 4a12 12 0 0 1 12 12" transform="translate(-2 2)"/><circle cx="5" cy="19" r="1.5" fill="currentColor"/></symbol>
   </defs>
 </svg>
@@ -68,6 +69,7 @@
   <button class="fab" id="btnAnchor" aria-label="Anchor Watch"><svg class="ic"><use href="#i-anchor"/></svg></button>
   <button class="fab" id="btnRec" aria-label="บันทึกเส้นทาง"><svg class="ic"><use href="#i-rec"/></svg></button>
   <button class="fab" id="btnSave" aria-label="บันทึกตำแหน่งปัจจุบันเป็น Waypoint"><svg class="ic"><use href="#i-pinplus"/></svg></button>
+  <button class="fab" id="btnCompass" aria-label="หมุนแผนที่ตามหัวเรือ"><svg class="ic"><use href="#i-north"/></svg></button>
   <button class="fab big" id="btnFollow" aria-label="กลับไปตำแหน่งเรือ / ติดตามอัตโนมัติ"><svg class="ic"><use href="#i-locate"/></svg></button>
 </div>
 
@@ -90,6 +92,7 @@
 <div id="toasts"></div>
 
 <script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet-rotate.js"></script>
 <script type="module" src="js/main.js"></script>
 <noscript>แอปนี้ต้องใช้ JavaScript</noscript>
 </body>

@@ -1,15 +1,15 @@
-// App bootstrap: wires GPS, map, HUD, search, alerts, pages.
+﻿// App bootstrap: wires GPS, map, HUD, search, alerts, pages.
 import { app, $ } from './app.js';
 import { db, requestPersistence } from './db.js';
 import { on, emit, getSettings as S, log, lsGet, lsSet } from './store.js';
-import { gps, start as gpsStart, stop as gpsStop, isWatching, wants, permissionState } from './gps.js';
+import { gps, start as gpsStart, stop as gpsStop, isWatching, wants, permissionState, startCompass, compassOK } from './gps.js';
 import { setAlert, clearAlert, toast } from './alerts.js';
 import { nav, update as navUpdate, stopNav, startNav, anchor, setAnchor, checkAnchor } from './nav.js';
 import * as trip from './trip.js';
 import * as map from './map.js';
 import { modal, confirmDlg, overlay } from './ui.js';
-import { renderRoutes, renderPlaces, renderTrips, renderSettings, recCardHtml, onPageClick, onPageChange, placeForm, savePlaceHere, draftAdd } from './views.js';
-import { esc, KN, distM, bearing, fmtSpeed, fmtDist, fmtBearing, fmtClock, joinVU, joinCoord, fmtCoord, parseCoords, NA } from './util.js';
+import { renderRoutes, renderPlaces, renderTrips, renderSettings, recCardHtml, recLiveText, onPageClick, onPageChange, placeForm, savePlaceHere, draftAdd } from './views.js';
+import { esc, KN, distM, bearing, fmtSpeed, fmtDist, fmtBearing, fmtClock, fmtDurCell, dirWord, joinVU, joinCoord, fmtCoord, parseCoords, NA } from './util.js';
 
 const ic = (n, c = '') => `<svg class="ic ${c}"><use href="#i-${n}"/></svg>`;
 let lastTileOk = lsGet('bn.lastTile', 0);
@@ -23,57 +23,99 @@ function applyTheme() {
   if (m) m.content = { dark: '#06121f', light: '#eaf3fa', contrast: '#ffffff' }[t] || '#06121f';
 }
 
-// ------------------------------------------------------------------ HUD
-function cell(label, val, cls = '') {
-  const na = val == null;
-  return `<div class="cell ${cls}"><label>${label}</label><div class="v num ${na ? 'na' : ''}">${na ? NA : esc(val.value)}</div><div class="u">${na ? '' : esc(val.unit || '')}&nbsp;</div></div>`;
-}
-
-function markerHeading(f) {
-  if (gps.status === 'ok' && f.speed != null && f.speed >= 0.5 * KN && f.cog != null) return f.cog;
-  if (gps.compassOn && gps.compass != null) return gps.compass;
+// ------------------------------------------------------------------ heading
+/** Best available heading: GPS course when really moving (>= ~1.5 kn), else the phone compass, else unknown (null). */
+function currentHeading() {
+  const f = gps.fix;
+  if (f && gps.status === 'ok' && f.speed != null && f.speed >= 0.75 && f.cog != null) return f.cog;
+  if (compassOK()) return gps.compass;
   return null;
 }
+const pushHeading = () => map.setHeading(currentHeading());
 
-function renderHud() {
+// ------------------------------------------------------------------ HUD
+// The HUD DOM is built once per layout (navigating? expanded?) and afterwards only text is patched.
+// Re-creating it every second used to swallow taps (the button vanished between touch-down and touch-up).
+let hudKey = '';
+
+const cellHtml = (k, label, cls = '') => `<div class="cell ${cls}" data-k="${k}"><label>${label}</label><div class="v num"></div><div class="u"></div></div>`;
+
+function setCell(el, val) {
+  const v = el.querySelector('.v');
+  const u = el.querySelector('.u');
+  const na = val == null;
+  const t = na ? NA : String(val.value);
+  const ut = na ? '' : val.unit || '';
+  if (v.textContent !== t) v.textContent = t;
+  v.classList.toggle('na', na);
+  if (u.textContent !== ut) u.textContent = ut;
+}
+
+function buildHud() {
+  const navOn = nav.active;
+  const open = app.hudOpen;
+  hudKey = navOn + '|' + open;
+  const main = navOn
+    ? [['spd', 'ความเร็ว'], ['left', 'เหลืออีก'], ['eta', 'ถึงเมื่อ'], ['dist', 'ระยะเหลือ']]
+    : [['spd', 'ความเร็ว'], ['dir', 'ทิศที่ไป'], ['dur', 'เวลาเดินทาง'], ['trip', 'ไปแล้ว']];
+  const navbar = navOn ? `<div class="navbar">${ic('nav', 'sm')}<b data-t="navtxt"></b><button class="btn sm" data-h="stopnav">จบ</button></div>` : '';
+  const grid = [['acc', 'ความแม่นยำ GPS'], ['age', 'อัปเดตล่าสุด'], ['head', 'หัวเรือ (เข็มทิศ)'], ['cog', 'ทิศที่เรือกำลังไป'], ['trip', 'ระยะที่ไปแล้ว']];
+  if (navOn) grid.push(['since', 'เดินทางมาแล้ว'], ['brg', 'ทิศไปจุดหมาย'], ['xte', 'เบี่ยงจากเส้นทาง']);
+  const more = open
+    ? `<div class="hud-more"><div class="cell wide" data-k="pos"><label>ตำแหน่งตอนนี้</label><div class="v num pre"></div><div class="u"></div></div><div class="hud-grid">${grid.map(([k, l]) => cellHtml(k, l)).join('')}</div></div>`
+    : '';
+  $('#hud').innerHTML = `${navbar}<button class="hud-main" data-h="toggle" aria-expanded="${open}" aria-label="ข้อมูลการเดินทาง แตะเพื่อดูเพิ่ม">${main.map(([k, l]) => cellHtml(k, l)).join('')}</button><div class="hud-grab">${ic(open ? 'down' : 'up')}</div>${more}`;
+}
+
+function hudValues() {
   const s = S();
   const f = gps.fix;
   const fresh = gps.status === 'ok';
-  const moving = fresh && f.speed != null && f.speed >= 0.5 * KN;
-  const sog = fresh ? fmtSpeed(f.speed, s.speedUnit) : null;
-  const cog = moving && f.cog != null ? { value: fmtBearing(f.cog), unit: 'COG °T' } : null;
-  const hdg = gps.compassOn && gps.compass != null ? { value: fmtBearing(gps.compass), unit: 'เข็มทิศมือถือ' } : null;
-  const tripD = trip.rec.trip ? fmtDist(trip.rec.trip.distanceM, s.distUnit) : null;
+  const h = currentHeading();
+  const moving = fresh && f.speed != null && f.speed >= 0.75 && f.cog != null;
   const info = nav.active && fresh ? nav.info : null;
-  const c3 = nav.active ? cell('DST', info ? fmtDist(info.remaining, s.distUnit) : null) : cell('HDG', hdg);
-  const c4 = nav.active ? cell('ETA', info?.eta ? { value: fmtClock(info.eta), unit: 'โดยประมาณ' } : null) : cell('TRIP', tripD);
+  const t = trip.rec.trip;
+  const tripDist = t ? fmtDist(t.distanceM, s.distUnit) : null;
+  const left = info && !info.arrived ? fmtDurCell(info.leftMs) : null;
+  const c = fmtCoord(f, s.coordFmt);
+  const tgt = nav.points[nav.idx];
+  const V = {
+    spd: fresh ? fmtSpeed(f.speed, s.speedUnit) : null,
+    dir: h != null ? { value: fmtBearing(h), unit: dirWord(h) } : null,
+    dur: t ? fmtDurCell(trip.elapsedMs(t)) : null,
+    trip: tripDist,
+    left: left ? { value: left.value, unit: left.unit + (info.estimated ? ' (ประมาณ)' : '') } : null,
+    eta: info && !info.arrived ? { value: fmtClock(info.eta), unit: info.estimated ? 'ประมาณ' : 'น.' } : null,
+    dist: info ? fmtDist(info.remaining, s.distUnit) : null,
+    pos: c ? { value: c.lat + '\n' + c.lng, unit: fresh ? '' : 'ตำแหน่งล่าสุดที่ได้รับ' } : null,
+    acc: f ? { value: '±' + Math.round(f.acc), unit: 'ม.' } : null,
+    age: f ? { value: Math.round((Date.now() - gps.recvAt) / 1000), unit: 'วินาทีก่อน' } : null,
+    head: compassOK() ? { value: fmtBearing(gps.compass), unit: dirWord(gps.compass) } : null,
+    cog: moving ? { value: fmtBearing(f.cog), unit: dirWord(f.cog) } : null,
+    since: nav.active && nav.startedAt ? fmtDurCell(Date.now() - nav.startedAt) : null,
+    brg: info ? { value: fmtBearing(info.brg), unit: dirWord(info.brg) } : null,
+    xte: info ? fmtDist(info.xte, s.distUnit) : null,
+  };
+  V.navtxt = nav.active ? `ไป ${tgt?.name || 'จุดหมาย'} (${nav.idx + 1}/${nav.points.length})${info ? ' · อีก ' + joinVU(fmtDist(info.toNext, s.distUnit)) : ' · ' + NA}` : '';
+  return V;
+}
 
-  let navbar = '';
-  if (nav.active) {
-    const t = nav.points[nav.idx];
-    navbar = `<div class="navbar">${ic('nav', 'sm')}<b>${esc(t?.name || 'จุดหมาย')} (${nav.idx + 1}/${nav.points.length})${info ? ` · ${fmtBearing(info.brg)} · ${joinVU(fmtDist(info.toNext, s.distUnit))}` : ' · ' + NA}</b><button class="btn sm" data-h="stopnav">จบ</button></div>`;
-  }
-  let more = '';
-  if (app.hudOpen) {
-    const c = fmtCoord(f, s.coordFmt);
-    const age = f ? Math.round((Date.now() - gps.recvAt) / 1000) : null;
-    more = `<div class="hud-more"><div class="cell wide"><label>POS${f && !fresh ? ' (ตำแหน่งล่าสุด)' : ''}</label><div class="v num ${c ? '' : 'na'}">${c ? esc(c.lat) + '<br>' + esc(c.lng) : NA}</div></div><div class="hud-grid">
-      ${cell('ACC', f ? { value: '±' + Math.round(f.acc), unit: 'm' } : null)}${cell('อัปเดตล่าสุด', age != null ? { value: age, unit: 'วินาทีก่อน' } : null)}
-      ${cell('HDG', hdg)}${cell('TRIP', tripD)}
-      ${nav.active ? cell('BRG', info ? { value: fmtBearing(info.brg), unit: 'ไปจุดถัดไป' } : null) + cell('XTE', info ? fmtDist(info.xte, s.distUnit) : null) : ''}</div></div>`;
-  }
-  $('#hud').innerHTML = `${navbar}<button class="hud-main" data-h="toggle" aria-expanded="${app.hudOpen}" aria-label="ข้อมูลการเดินเรือ แตะเพื่อขยาย">${cell('SOG', sog)}${cell('COG', cog)}${c3}${c4}</button>
-    <div class="hud-grab">${ic(app.hudOpen ? 'down' : 'up')}</div>${more}`;
+function renderHud() {
+  if (hudKey !== nav.active + '|' + app.hudOpen) buildHud();
+  const V = hudValues();
+  document.querySelectorAll('#hud .cell[data-k]').forEach((el) => setCell(el, V[el.dataset.k]));
+  const t = $('#hud [data-t=navtxt]');
+  if (t && t.textContent !== V.navtxt) t.textContent = V.navtxt;
 }
 
 $('#hud').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-h]');
   if (!b) return;
   if (b.dataset.h === 'toggle') { app.hudOpen = !app.hudOpen; document.body.classList.toggle('hud-open', app.hudOpen); renderHud(); }
-  else if (b.dataset.h === 'stopnav' && (await confirmDlg('จบการนำทาง?', 'การนำทางปัจจุบันจะสิ้นสุดลง', 'จบการนำทาง'))) stopNav();
+  else if (b.dataset.h === 'stopnav' && (await confirmDlg('หยุดนำทาง?', 'การนำทางตอนนี้จะสิ้นสุดลง', 'หยุดนำทาง'))) stopNav();
 });
 // Collapsed-HUD height drives where controls/sheets sit; the expanded HUD simply overlays them.
-new ResizeObserver(() => document.documentElement.style.setProperty('--hud-h', Math.min($('#hud').offsetHeight, 140) + 'px')).observe($('#hud'));
+new ResizeObserver(() => document.documentElement.style.setProperty('--hud-h', Math.min($('#hud').offsetHeight, 190) + 'px')).observe($('#hud'));
 
 // ------------------------------------------------------------------ GPS chip + alerts
 function renderChip() {
@@ -83,7 +125,7 @@ function renderChip() {
   let led = '', txt = '';
   if (st === 'idle') { led = ''; txt = 'GPS ปิด'; }
   else if (st === 'asking' || st === 'searching') { led = 'pulse'; txt = 'กำลังหา GPS…'; }
-  else if (st === 'ok') { led = f.acc > lim ? 'warn' : 'ok'; txt = `GPS ±${Math.round(f.acc)} m`; }
+  else if (st === 'ok') { led = f.acc > lim ? 'warn' : 'ok'; txt = `GPS ±${Math.round(f.acc)} ม.`; }
   else if (st === 'stale') { led = 'warn'; txt = 'ข้อมูลเก่า'; }
   else if (st === 'lost') { led = 'bad'; txt = 'GPS ขาด'; }
   else if (st === 'denied') { led = 'bad'; txt = 'ไม่ได้รับอนุญาต'; }
@@ -98,7 +140,7 @@ function syncGpsAlerts() {
   else if (st === 'stale') want.gps = { level: 'warn', title: 'ข้อมูลตำแหน่งเก่า', text: 'ไม่ได้รับตำแหน่งใหม่เกิน 10 วินาที' };
   else if (st === 'unavailable') want.gps = { level: 'warn', title: 'GPS ไม่พร้อมใช้งาน', text: 'ตรวจสอบว่าเปิดบริการตำแหน่งของอุปกรณ์แล้ว', action: { label: 'ลองใหม่', fn: retryGps } };
   else if (st === 'denied') want.gps = { level: 'warn', title: 'ไม่ได้รับอนุญาตใช้ตำแหน่ง', text: 'เปิดสิทธิ์ตำแหน่งในการตั้งค่าเบราว์เซอร์', action: { label: 'วิธีเปิด', fn: showDenied } };
-  else if (st === 'ok' && gps.fix.acc > S().lowAccM) want.lowacc = { level: 'warn', title: 'ความแม่นยำ GPS ต่ำ', text: `±${Math.round(gps.fix.acc / 10) * 10} m — ตำแหน่งอาจคลาดเคลื่อน` };
+  else if (st === 'ok' && gps.fix.acc > S().lowAccM) want.lowacc = { level: 'warn', title: 'ความแม่นยำ GPS ต่ำ', text: `คลาดเคลื่อนได้ประมาณ ${Math.round(gps.fix.acc / 10) * 10} ม.` };
   for (const id of ['gps', 'lowacc']) (want[id] ? setAlert(id, want[id]) : clearAlert(id));
 }
 
@@ -116,7 +158,7 @@ function showAsk() {
   overlay({
     title: 'ขออนุญาตใช้ตำแหน่ง',
     text: 'Boat Navigator ใช้ GPS ของอุปกรณ์เพื่อแสดงตำแหน่งเรือ ความเร็ว และบันทึกเส้นทาง ข้อมูลตำแหน่งเก็บไว้ในเครื่องของคุณ (มีเพียงคำค้นหาที่ส่งไปยังบริการค้นหา Nominatim)',
-    actions: [{ label: 'อนุญาตและเริ่มใช้งาน', cls: 'primary', fn: () => { overlay(null); gpsStart(); } }, { label: 'ดูแผนที่โดยไม่ใช้ GPS', fn: () => overlay(null) }],
+    actions: [{ label: 'อนุญาตและเริ่มใช้งาน', cls: 'primary', fn: () => { startCompass(); overlay(null); gpsStart(); } }, { label: 'ดูแผนที่โดยไม่ใช้ GPS', fn: () => overlay(null) }],
   });
 }
 
@@ -137,7 +179,7 @@ function gpsInfoDialog() {
   modal({
     title: 'สถานะ GPS',
     body: `<div class="card"><div class="row"><div class="grow">สถานะ</div><b>${label}</b></div>
-      <div class="row"><div class="grow">ความแม่นยำ</div><b class="num">${f ? '±' + Math.round(f.acc) + ' m' : NA}</b></div>
+      <div class="row"><div class="grow">ความแม่นยำ</div><b class="num">${f ? '±' + Math.round(f.acc) + ' ม.' : NA}</b></div>
       <div class="row"><div class="grow">อัปเดตล่าสุด</div><b class="num">${f ? fmtClock(gps.recvAt) : NA}</b></div>
       <div class="row"><div class="grow">เครือข่าย</div><b>${navigator.onLine ? 'ออนไลน์' : 'ออฟไลน์'}</b></div></div>
       <p class="sub">GPS ในมือถือคลาดเคลื่อนได้หลายเมตร และแย่ลงใต้หลังคาหรือใกล้โครงสร้างโลหะ ควรวางเครื่องในที่โล่งเห็นท้องฟ้า</p>`,
@@ -153,7 +195,7 @@ let lastOvl = 0;
 function refreshOverlays() {
   lastOvl = Date.now();
   const f = gps.fix;
-  const items = app.places.map((p) => ({ lat: p.lat, lng: p.lng, html: pinHtml('c-' + p.cat), onClick: () => selectPoint({ lat: p.lat, lng: p.lng, name: p.name, placeId: p.id }) }));
+  const items = app.places.map((p) => ({ lat: p.lat, lng: p.lng, html: pinHtml('c-' + p.cat), id: p.id, onClick: () => selectPoint({ lat: p.lat, lng: p.lng, name: p.name, placeId: p.id }) }));
   map.setMarkers('places', items);
 
   const mk = [];
@@ -284,13 +326,30 @@ function renderFabs() {
   const br = $('#btnRec');
   br.className = 'fab' + (trip.rec.status === 'recording' ? ' rec' : trip.rec.status === 'paused' ? ' paused' : '');
   $('#btnAnchor').classList.toggle('warn', anchor.active);
+  const bc = $('#btnCompass');
+  const course = map.getMode() === 'course';
+  bc.classList.toggle('on', course);
+  bc.setAttribute('aria-pressed', course);
+  bc.setAttribute('aria-label', course ? 'แผนที่หมุนตามหัวเรือ แตะเพื่อให้ทิศเหนืออยู่ด้านบน' : 'ทิศเหนืออยู่ด้านบน แตะเพื่อให้แผนที่หมุนตามหัวเรือ');
 }
 
+/** Zoom in and lock on the boat, like the "my location" button in a car-navigation app. */
+function lockOnBoat() {
+  if (!gps.fix) return toast('ยังไม่พบตำแหน่ง GPS', 'warn');
+  map.lockOn(gps.fix, 17);
+}
 $('#btnFollow').addEventListener('click', () => {
-  if (map.isFollowing()) { map.setFollow(false); toast('ปิดการติดตามตำแหน่งอัตโนมัติ'); return; }
-  if (!gps.fix) return toast('ยังไม่มีตำแหน่ง GPS', 'warn');
-  map.recenter(gps.fix);
+  if (map.isFollowing()) { map.setFollow(false); toast('หยุดตามเรือ — แผนที่ไม่เลื่อนตามแล้ว'); return; }
+  lockOnBoat();
 });
+$('#btnCompass').addEventListener('click', () => {
+  const next = map.getMode() === 'course' ? 'north' : 'course';
+  map.setMode(next);
+  toast(next === 'course' ? 'แผนที่หมุนตามหัวเรือ' : 'ทิศเหนืออยู่ด้านบน');
+});
+on('boatclick', () => lockOnBoat());
+on('bearing', (b) => { const s = $('#btnCompass svg'); if (s) s.style.transform = `rotate(${b}deg)`; });
+on('mode', renderFabs);
 $('#btnZoomIn').addEventListener('click', () => map.zoomBy(1));
 $('#btnZoomOut').addEventListener('click', () => map.zoomBy(-1));
 $('#btnSave').addEventListener('click', () => savePlaceHere());
@@ -300,15 +359,15 @@ $('#btnRec').addEventListener('click', () => {
   else showTab('trips');
 });
 $('#btnAnchor').addEventListener('click', async () => {
-  const warn = '<div class="note">Anchor Watch ทำงานเฉพาะเมื่อแอปเปิดอยู่ หน้าจอไม่ล็อก และมีสัญญาณ GPS เท่านั้น ใช้เป็นตัวช่วยเสริม ไม่ใช่ทดแทนการเฝ้าระวังด้วยตัวเอง</div>';
+  const warn = '<div class="note">เตือนเรือลอยทำงานเฉพาะเมื่อแอปเปิดอยู่ หน้าจอไม่ล็อก และมีสัญญาณ GPS เท่านั้น ใช้เป็นตัวช่วยเสริม ไม่ใช่ทดแทนการเฝ้าระวังด้วยตัวเอง</div>';
   if (anchor.active) {
-    const ok = await modal({ title: 'Anchor Watch เปิดอยู่', body: `<p class="sub">รัศมี ${anchor.radius} ม. จากจุดทอดสมอ</p>${warn}`, ok: 'ยกเลิก Anchor Watch', danger: true, cancel: 'ปิด' });
+    const ok = await modal({ title: 'เตือนเรือลอย (ทอดสมอ) เปิดอยู่', body: `<p class="sub">รัศมี ${anchor.radius} ม. จากจุดทอดสมอ</p>${warn}`, ok: 'ปิดการเตือนเรือลอย', danger: true, cancel: 'ปิด' });
     if (ok) setAnchor(false);
     return;
   }
-  if (!gps.fix) return toast('ต้องมีสัญญาณ GPS ก่อนตั้ง Anchor Watch', 'warn');
-  const r = await modal({ title: 'ตั้ง Anchor Watch', body: `<p class="sub">ใช้ตำแหน่งปัจจุบันเป็นจุดทอดสมอ</p><div class="field"><label>รัศมีเตือน (เมตร) — ควรมากกว่าความแม่นยำ GPS</label><input type="number" id="r" value="${Math.max(50, Math.ceil((gps.fix.acc || 0) * 3 / 10) * 10)}" min="10" max="1000"></div>${warn}`, ok: 'เริ่มเฝ้าระวัง', onOk: (d) => { const v = parseInt(d.querySelector('#r').value, 10); if (!(v >= 10 && v <= 1000)) { toast('รัศมี 10–1000 ม.', 'err'); return false; } return v; } });
-  if (r) { setAnchor(true, r); toast('เริ่ม Anchor Watch แล้ว'); }
+  if (!gps.fix) return toast('ต้องมีสัญญาณ GPS ก่อนตั้งเตือนเรือลอย', 'warn');
+  const r = await modal({ title: 'ตั้งเตือนเรือลอย (ทอดสมอ)', body: `<p class="sub">ใช้ตำแหน่งปัจจุบันเป็นจุดทอดสมอ</p><div class="field"><label>รัศมีเตือน (เมตร) — ควรมากกว่าความแม่นยำ GPS</label><input type="number" id="r" value="${Math.max(50, Math.ceil((gps.fix.acc || 0) * 3 / 10) * 10)}" min="10" max="1000"></div>${warn}`, ok: 'เริ่มเฝ้าระวัง', onOk: (d) => { const v = parseInt(d.querySelector('#r').value, 10); if (!(v >= 10 && v <= 1000)) { toast('รัศมี 10–1000 ม.', 'err'); return false; } return v; } });
+  if (r) { setAnchor(true, r); toast('เริ่มเฝ้าระวังเรือลอยแล้ว'); }
 });
 
 // ------------------------------------------------------------------ search
@@ -377,7 +436,8 @@ $('#searchBtn').addEventListener('click', () => openSearch('goto'));
 
 // ------------------------------------------------------------------ events
 on('fix', (f) => {
-  map.updateBoat(f, markerHeading(f));
+  pushHeading();
+  map.updateBoat(f);
   map.setBoatStale(false);
   navUpdate(f);
   trip.onFix(f);
@@ -397,9 +457,11 @@ on('gps', (st) => {
 });
 on('tick', () => {
   renderHud(); checkAnchor();
-  if (app.tab === 'trips' && $('#recCard')) $('#recCard').innerHTML = recCardHtml();
+  const live = $('#recLive');
+  if (app.tab === 'trips' && live) live.textContent = recLiveText();
 });
-on('compass', () => { if (gps.fix) map.rotateBoat(markerHeading(gps.fix)); renderHud(); });
+on('compass', () => { pushHeading(); });
+on('compassState', (st) => { if (st === 'denied') toast('ไม่ได้รับอนุญาตใช้เข็มทิศ — จะใช้ทิศจาก GPS เมื่อเรือเคลื่อนที่', 'warn', 5000); renderHud(); });
 on('nav', () => { refreshOverlays(); renderHud(); if (app.tab === 'routes') renderPage(); updateWake(); });
 on('navinfo', () => { renderHud(); ovlSoon(); });
 on('anchor', () => { refreshOverlays(); renderFabs(); updateWake(); });
@@ -475,6 +537,10 @@ async function boot() {
   map.initMap($('#map'));
   map.applyTiles(S());
   renderHud(); renderChip(); renderFabs();
+  // Heading is always on: start the compass now (Android), and on the first tap (iOS only allows it from a gesture).
+  startCompass();
+  const onTap = () => { startCompass().then((st) => { if (st === 'on' || st === 'denied' || st === 'unsupported') document.removeEventListener('click', onTap, true); }); };
+  document.addEventListener('click', onTap, true);
   try {
     await db.ready();
     [app.places, app.routes, app.trips] = await Promise.all([db.all('places'), db.all('routes'), db.all('trips')]);
