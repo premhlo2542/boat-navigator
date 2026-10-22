@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>smoke</title>
+<link rel="stylesheet" href="../vendor/leaflet.css"><link rel="stylesheet" href="../css/app.css">
+<pre id="out" style="position:relative;z-index:9999;background:#fff;color:#000;margin:0;white-space:pre-wrap">RUNNING</pre>
+<script src="../vendor/leaflet.js"></script>
+<script type="module">
+const out = document.getElementById('out');
+const lines = [];
+const log = (s) => lines.push(s);
+let fails = 0;
+const ok = (c, m) => { if (!c) fails++; log((c ? 'PASS ' : 'FAIL ') + m); };
+window.addEventListener('error', (e) => { fails++; log('ERROR ' + e.message + ' @' + e.filename + ':' + e.lineno); });
+window.addEventListener('unhandledrejection', (e) => { fails++; log('REJECT ' + (e.reason && e.reason.stack || e.reason)); });
+try {
+  // inject index.html body so main.js finds its elements
+  const html = await (await fetch('../index.html')).text();
+  const body = new DOMParser().parseFromString(html, 'text/html').body;
+  body.querySelectorAll('script').forEach((s) => s.remove());
+  const holder = document.createElement('div');
+  holder.innerHTML = body.innerHTML;
+  document.body.append(...holder.childNodes);
+  document.querySelector('#overlay').style.display = 'none';
+
+  const u = await import('../js/util.js');
+  ok(Math.abs(u.distM({ lat: 0, lng: 0 }, { lat: 1, lng: 0 }) - 111195) < 100, 'distM 1deg lat ~111.2km');
+  ok(Math.abs(u.bearing({ lat: 0, lng: 0 }, { lat: 1, lng: 0 })) < 0.01, 'bearing north = 0');
+  ok(Math.abs(u.bearing({ lat: 0, lng: 0 }, { lat: 0, lng: 1 }) - 90) < 0.01, 'bearing east = 90');
+  const off = u.offTrackM({ lat: 0.5, lng: 0.01 }, { lat: 0, lng: 0 }, { lat: 1, lng: 0 });
+  ok(Math.abs(off - 1112) < 15, 'offTrack ~1.1km: ' + Math.round(off));
+  ok(Math.abs(u.offTrackM({ lat: 2, lng: 0 }, { lat: 0, lng: 0 }, { lat: 1, lng: 0 }) - 111195) < 100, 'offTrack beyond end -> dist to end');
+  const c = u.fmtCoord({ lat: 13.75, lng: -100.5 }, 'ddm');
+  ok(c.lat === `13° 45.000′ N` && c.lng === `100° 30.000′ W`, 'ddm: ' + c.lat + ' | ' + c.lng);
+  ok(u.fmtCoord({ lat: 13.75, lng: 100.5 }, 'dms').lat === `13° 45′ 0.0″ N`, 'dms');
+  ok(u.parseCoords('13.7, 100.5')?.lng === 100.5 && u.parseCoords('99, 10') === null && u.parseCoords('abc') === null, 'parseCoords');
+  ok(u.fmtSpeed(1852 / 3600 * 10, 'kn').value === '10' && u.fmtSpeed(null) === null, 'fmtSpeed 10kn / null');
+  ok(u.fmtDist(100, 'nm').unit === 'm' && u.fmtDist(3704, 'nm').value === '2.00', 'fmtDist');
+  ok(u.esc('<b>"x"</b>') === '&lt;b&gt;&quot;x&quot;&lt;/b&gt;', 'esc');
+
+  const g = await import('../js/gpx.js');
+  const x = g.tripToGpx({ name: 'A&B', startedAt: 0, points: [[1, 2, 1000, 5, 1.5], [1.1, 2.1, 2000, 5, null]] });
+  const doc = new DOMParser().parseFromString(x, 'application/xml');
+  ok(!doc.querySelector('parsererror') && doc.getElementsByTagName('trkpt').length === 2 && doc.getElementsByTagName('name')[0].textContent === 'A&B', 'GPX well-formed, 2 trkpt, escaped name');
+
+  // full app boot
+  const m = await import('../js/main.js');
+  await new Promise((r) => setTimeout(r, 800));
+  ok(!!document.querySelector('.leaflet-container'), 'leaflet map created');
+  ok(document.querySelector('#hud .hud-main'), 'HUD rendered');
+  ok(/ไม่มีข้อมูล/.test(document.querySelector('#hud').textContent), 'HUD shows "ไม่มีข้อมูล" without GPS (no fake values)');
+
+  const { gps } = await import('../js/gps.js');
+  const { emit } = await import('../js/store.js');
+  const nav = await import('../js/nav.js');
+  const trip = await import('../js/trip.js');
+  const { app } = await import('../js/app.js');
+  const feed = (lat, lng, speed = 5, acc = 5) => { gps.fix = { lat, lng, acc, speed, cog: 0, alt: null, ts: Date.now() }; gps.recvAt = Date.now(); gps.status = 'ok'; emit('gps', 'ok'); emit('fix', gps.fix); };
+  feed(0, 0);
+  ok(/5\.0|5\.1|9\.7|9\.8/.test(document.querySelector('#hud .cell .v').textContent) || document.querySelector('#hud .cell .v').textContent.length > 0, 'SOG renders: ' + document.querySelector('#hud .cell .v').textContent);
+  ok(document.querySelector('#gpsChip').textContent.includes('±5'), 'GPS chip shows accuracy');
+
+  // trip recording
+  await trip.start('t');
+  feed(0.0005, 0); feed(0.0010, 0); feed(0.00101, 0);
+  ok(trip.rec.trip.points.length === 2 && trip.rec.trip.distanceM > 50 && trip.rec.trip.distanceM < 60, 'trip: 2 points, 1m jitter step skipped, dist=' + Math.round(trip.rec.trip.distanceM) + ' n=' + trip.rec.trip.points.length);
+  const done = await trip.stop();
+  ok(done.status === 'done', 'trip stopped');
+  const { db } = await import('../js/db.js');
+  ok((await db.all('trips')).some((t) => t.id === done.id), 'trip persisted in IndexedDB');
+  await db.del('trips', done.id);
+
+  // navigation: start at 0,0 heading to (0.01,0); drift east 400m => off-course after 3 fixes
+  feed(0, 0);
+  nav.startNav([{ lat: 0.05, lng: 0, name: 'dest' }]);
+  ok(nav.nav.active && nav.nav.info && Math.abs(nav.nav.info.remaining - 5560) < 30, 'nav remaining ~5.56km: ' + Math.round(nav.nav.info?.remaining));
+  feed(0.01, 0.004); feed(0.011, 0.004); feed(0.012, 0.004);
+  ok(document.querySelector('#alerts').textContent.includes('ออกนอกเส้นทาง'), 'off-course alert shown');
+  feed(0.0499, 0);
+  ok(nav.nav.info.arrived === true && document.querySelector('#alerts').textContent.includes('ถึงจุดหมาย'), 'arrival alert');
+  nav.stopNav();
+
+  // GPS lost
+  gps.recvAt = Date.now() - 40000; emit('tick'); gps.status = 'lost'; emit('gps', 'lost');
+  ok(document.querySelector('#alerts').textContent.includes('สัญญาณ GPS ขาดหาย'), 'GPS lost critical alert');
+  ok(/ไม่มีข้อมูล/.test(document.querySelector('#hud .cell .v').outerHTML), 'SOG not shown when GPS lost');
+
+  // tabs render
+  for (const t of ['routes', 'places', 'trips', 'settings', 'map']) {
+    document.querySelector(`#tabs [data-tab=${t}]`).click();
+    await new Promise((r) => setTimeout(r, 50));
+    ok(t === 'map' ? document.querySelector('#page').hidden : document.querySelector('#page').textContent.length > 30, 'tab ' + t);
+  }
+  // anchor
+  feed(0, 0);
+  nav.setAnchor(true, 50);
+  feed(0.001, 0);
+  ok(document.querySelector('#alerts').textContent.includes('นอกรัศมีสมอ'), 'anchor alarm');
+  nav.setAnchor(false);
+} catch (e) { fails++; log('EXCEPTION ' + (e.stack || e)); }
+try { const st = await import('../js/store.js'); log('APPLOG ' + JSON.stringify(st.getLog())); log('OVERLAY ' + document.querySelector('#overlay').textContent.slice(0, 200)); } catch {}
+out.textContent = lines.join('\n') + '\nDONE fails=' + fails;
+</script>
